@@ -1,4 +1,4 @@
-name: Build UniWin 0.4 Custom UI
+name: Build UniWin 0.4.1 Custom UI
 
 on:
   workflow_dispatch:
@@ -65,25 +65,23 @@ jobs:
           cd runtime-src
 
           sed -i "s/applicationId 'com.winlator'/applicationId 'com.uniwin.runtime'/" app/build.gradle
-          sed -i 's/versionName "11.2"/versionName "0.4-custom-ui"/' app/build.gradle
-          sed -i 's/versionCode 33/versionCode 40/' app/build.gradle
+          sed -i 's/versionName "11.2"/versionName "0.4.1-custom-ui"/' app/build.gradle
+          sed -i 's/versionCode 33/versionCode 41/' app/build.gradle
           sed -i 's/android:authorities="com.winlator.FileProvider"/android:authorities="com.uniwin.runtime.FileProvider"/' app/src/main/AndroidManifest.xml
 
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
           p = Path("app/src/main/AndroidManifest.xml")
           s = p.read_text()
-          old = '''        <activity android:name="com.winlator.MainActivity"
-              android:theme="@style/AppThemeDark"
-              android:exported="true"
-              android:screenOrientation="sensor"
-              android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation">
-              <intent-filter>
-                  <action android:name="android.intent.action.MAIN"/>
-                  <category android:name="android.intent.category.LAUNCHER"/>
-              </intent-filter>
-          </activity>'''
-          new = '''        <activity android:name="com.winlator.MainActivity"
+
+          pattern = re.compile(
+              r'<activity\s+android:name="com\.winlator\.MainActivity".*?</activity>',
+              re.DOTALL
+          )
+
+          replacement = '''<activity android:name="com.winlator.MainActivity"
               android:theme="@style/AppThemeDark"
               android:exported="false"
               android:screenOrientation="sensor"
@@ -99,9 +97,12 @@ jobs:
                   <category android:name="android.intent.category.LAUNCHER"/>
               </intent-filter>
           </activity>'''
-          if old not in s:
-              raise SystemExit("Could not locate MainActivity block")
-          p.write_text(s.replace(old, new))
+
+          new_s, count = pattern.subn(replacement, s, count=1)
+          if count != 1:
+              raise SystemExit(f"MainActivity manifest block replacement failed: count={count}")
+
+          p.write_text(new_s)
           PY
 
           cat > app/src/main/java/com/winlator/UniWinHomeActivity.java <<'EOF'
@@ -334,13 +335,13 @@ jobs:
           mkdir -p output
           APK="$(find runtime-src/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
           test -n "$APK" || (echo "APK not found" && exit 1)
-          cp "$APK" output/UniWin-0.4-Custom-UI.apk
+          cp "$APK" output/UniWin-0.4.1-Custom-UI.apk
           cp runtime-src/UNIWIN_UPSTREAM_LGPL_LICENSE.txt output/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UniWin-0.4-custom-ui
+          name: UniWin-0.4.1-custom-ui
           path: output/*
           if-no-files-found: error
           retention-days: 30
