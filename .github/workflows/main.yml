@@ -1,4 +1,4 @@
-name: Build UniWin 0.5 One Tap
+name: Build UniWin 0.5.1 Stable Launcher
 
 on:
   workflow_dispatch:
@@ -36,15 +36,25 @@ jobs:
               break
             fi
           done
-          if [ -z "$SDKMANAGER" ]; then SDKMANAGER="$(command -v sdkmanager || true)"; fi
-          test -n "$SDKMANAGER" || (echo "sdkmanager not found" && exit 1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+
+          test -n "$SDKMANAGER" || (
+            echo "sdkmanager not found"
+            exit 1
+          )
+
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
 
       - name: Install Android build tools
         shell: bash
         run: |
           set -e
+
           yes | "$SDKMANAGER" --licenses >/dev/null || true
+
           "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
@@ -56,21 +66,65 @@ jobs:
         shell: bash
         run: |
           set -e
-          git clone --depth 1 https://github.com/brunodev85/winlator-app.git runtime-src
+
+          git clone --depth 1 \
+            https://github.com/brunodev85/winlator-app.git \
+            runtime-src
 
       - name: Build UniWin launcher layer
         shell: bash
         run: |
           set -e
+
           cd runtime-src
 
-          sed -i "s/applicationId 'com.winlator'/applicationId 'com.uniwin.runtime'/" app/build.gradle
-          sed -i 's/versionCode 33/versionCode 50/' app/build.gradle
-          sed -i 's/versionName "11.2"/versionName "0.5-one-tap"/' app/build.gradle
-          sed -i 's/android:authorities="com.winlator.FileProvider"/android:authorities="com.uniwin.runtime.FileProvider"/' app/src/main/AndroidManifest.xml
+          sed -i \
+            "s/applicationId 'com.winlator'/applicationId 'com.uniwin.runtime'/" \
+            app/build.gradle
+
+          sed -i \
+            's/versionCode 33/versionCode 51/' \
+            app/build.gradle
+
+          sed -i \
+            's/versionName "11.2"/versionName "0.5.1-stable-launcher"/' \
+            app/build.gradle
+
+          sed -i \
+            's/android:authorities="com.winlator.FileProvider"/android:authorities="com.uniwin.runtime.FileProvider"/' \
+            app/src/main/AndroidManifest.xml
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path(
+              "app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java"
+          )
+
+          s = p.read_text()
+
+          s = s.replace(
+              "import com.winlator.MainActivity;\n",
+              ""
+          )
+
+          s = s.replace(
+              "public static void install(final MainActivity activity)",
+              "public static void install(final AppCompatActivity activity)"
+          )
+
+          s = s.replace(
+              "public static void installIfNeeded(final MainActivity activity)",
+              "public static void installIfNeeded(final AppCompatActivity activity)"
+          )
+
+          p.write_text(s)
+          PY
 
           if ! grep -q 'androidx.documentfile' app/build.gradle; then
-            sed -i "/dependencies {/a\\    implementation 'androidx.documentfile:documentfile:1.0.1'" app/build.gradle
+            sed -i \
+              "/dependencies {/a\\    implementation 'androidx.documentfile:documentfile:1.0.1'" \
+              app/build.gradle
           fi
 
           python3 - <<'PY'
@@ -84,6 +138,7 @@ jobs:
               r'<activity\s+android:name="com\.winlator\.MainActivity".*?</activity>',
               re.DOTALL
           )
+
           replacement = '''<activity android:name="com.winlator.MainActivity"
               android:theme="@style/AppThemeDark"
               android:exported="false"
@@ -95,14 +150,25 @@ jobs:
               android:exported="true"
               android:screenOrientation="sensor"
               android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|density|navigation">
+
               <intent-filter>
                   <action android:name="android.intent.action.MAIN"/>
                   <category android:name="android.intent.category.LAUNCHER"/>
               </intent-filter>
+
           </activity>'''
-          s2, count = pattern.subn(replacement, s, count=1)
+
+          s2, count = pattern.subn(
+              replacement,
+              s,
+              count=1
+          )
+
           if count != 1:
-              raise SystemExit(f"MainActivity manifest patch failed: {count}")
+              raise SystemExit(
+                  f"MainActivity manifest patch failed: {count}"
+              )
+
           p.write_text(s2)
           PY
 
@@ -124,11 +190,13 @@ jobs:
           import android.widget.TextView;
           import android.widget.Toast;
 
+          import androidx.appcompat.app.AppCompatActivity;
           import androidx.documentfile.provider.DocumentFile;
 
           import com.winlator.container.Container;
           import com.winlator.container.ContainerManager;
           import com.winlator.xenvironment.RootFS;
+          import com.winlator.xenvironment.RootFSInstaller;
 
           import org.json.JSONObject;
 
@@ -141,14 +209,19 @@ jobs:
           import java.util.concurrent.ExecutorService;
           import java.util.concurrent.Executors;
 
-          public class UniWinHomeActivity extends MainActivity {
+          public class UniWinHomeActivity extends AppCompatActivity {
+
               private static final int PICK_GAME_FOLDER = 5001;
 
-              private final ExecutorService io = Executors.newSingleThreadExecutor();
-              private final Handler main = new Handler(Looper.getMainLooper());
+              private final ExecutorService io =
+                      Executors.newSingleThreadExecutor();
+
+              private final Handler main =
+                      new Handler(Looper.getMainLooper());
 
               private TextView engineStatus;
               private TextView gameStatus;
+
               private Button pickButton;
               private Button playButton;
 
@@ -158,7 +231,23 @@ jobs:
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+
                   buildUniWinUI();
+
+                  try {
+                      RootFSInstaller.installIfNeeded(this);
+                  }
+                  catch (Throwable t) {
+                      engineStatus.setText(
+                              "실행 엔진 초기화 오류: "
+                                      + t.getClass().getSimpleName()
+                      );
+
+                      engineStatus.setTextColor(
+                              Color.rgb(255, 150, 150)
+                      );
+                  }
+
                   waitForRuntime();
               }
 
@@ -168,396 +257,1209 @@ jobs:
               }
 
               private void buildUniWinUI() {
-                  getWindow().setStatusBarColor(Color.rgb(8, 11, 17));
-                  getWindow().setNavigationBarColor(Color.rgb(8, 11, 17));
 
-                  ScrollView scroll = new ScrollView(this);
-                  scroll.setBackgroundColor(Color.rgb(8, 11, 17));
+                  getWindow().setStatusBarColor(
+                          Color.rgb(8, 11, 17)
+                  );
 
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(dp(20), dp(20), dp(20), dp(28));
+                  getWindow().setNavigationBarColor(
+                          Color.rgb(8, 11, 17)
+                  );
 
-                  root.addView(text("UNIWIN", 32, true, Color.WHITE));
-                  TextView sub = text("게임을 고르면 실행환경은 UniWin이 준비합니다.", 14, false, Color.rgb(155, 164, 178));
-                  sub.setPadding(0, dp(6), 0, dp(22));
+                  ScrollView scroll =
+                          new ScrollView(this);
+
+                  scroll.setBackgroundColor(
+                          Color.rgb(8, 11, 17)
+                  );
+
+                  LinearLayout root =
+                          new LinearLayout(this);
+
+                  root.setOrientation(
+                          LinearLayout.VERTICAL
+                  );
+
+                  root.setPadding(
+                          dp(20),
+                          dp(20),
+                          dp(20),
+                          dp(28)
+                  );
+
+                  root.addView(
+                          text(
+                                  "UNIWIN",
+                                  32,
+                                  true,
+                                  Color.WHITE
+                          )
+                  );
+
+                  TextView sub =
+                          text(
+                                  "게임을 고르면 실행환경은 UniWin이 준비합니다.",
+                                  14,
+                                  false,
+                                  Color.rgb(155, 164, 178)
+                          );
+
+                  sub.setPadding(
+                          0,
+                          dp(6),
+                          0,
+                          dp(22)
+                  );
+
                   root.addView(sub);
 
-                  LinearLayout runtimeCard = card();
-                  runtimeCard.addView(text("실행 엔진", 17, true, Color.WHITE));
-                  engineStatus = text("Wine / Box64 / DXVK 준비 상태 확인 중…", 13, false, Color.rgb(170, 177, 190));
-                  engineStatus.setPadding(0, dp(7), 0, 0);
-                  runtimeCard.addView(engineStatus);
-                  root.addView(runtimeCard);
+                  LinearLayout runtimeCard =
+                          card();
 
-                  root.addView(space(16));
+                  runtimeCard.addView(
+                          text(
+                                  "실행 엔진",
+                                  17,
+                                  true,
+                                  Color.WHITE
+                          )
+                  );
 
-                  LinearLayout gameCard = card();
-                  gameCard.addView(text("내 게임", 18, true, Color.WHITE));
+                  engineStatus =
+                          text(
+                                  "Wine / Box64 / DXVK 준비 상태 확인 중…",
+                                  13,
+                                  false,
+                                  Color.rgb(170, 177, 190)
+                          );
 
-                  gameStatus = text(
-                          "게임 폴더를 한 번 선택하면 UniWin 저장공간으로 가져온 뒤 바로 실행할 수 있습니다.",
-                          14, false, Color.rgb(176, 184, 197));
-                  gameStatus.setPadding(0, dp(8), 0, dp(14));
-                  gameCard.addView(gameStatus);
+                  engineStatus.setPadding(
+                          0,
+                          dp(7),
+                          0,
+                          0
+                  );
 
-                  pickButton = button("게임 폴더 추가");
-                  pickButton.setEnabled(false);
-                  pickButton.setOnClickListener(v -> selectGameFolder());
-                  gameCard.addView(pickButton);
+                  runtimeCard.addView(
+                          engineStatus
+                  );
 
-                  gameCard.addView(space(9));
+                  root.addView(
+                          runtimeCard
+                  );
 
-                  playButton = button("게임 실행");
-                  playButton.setEnabled(false);
-                  playButton.setOnClickListener(v -> startGame());
-                  gameCard.addView(playButton);
+                  root.addView(
+                          space(16)
+                  );
 
-                  root.addView(gameCard);
+                  LinearLayout gameCard =
+                          card();
 
-                  root.addView(space(18));
+                  gameCard.addView(
+                          text(
+                                  "내 게임",
+                                  18,
+                                  true,
+                                  Color.WHITE
+                          )
+                  );
 
-                  TextView note = text(
-                          "자동 처리: 게임 파일 가져오기 → EXE 찾기 → 기본 Wine 컨테이너 생성 → DXVK 설정 → 전체화면 실행\n" +
-                          "현재 0.5는 이 원터치 실행 흐름을 처음 연결하는 테스트 버전입니다.",
-                          12, false, Color.rgb(112, 121, 136));
-                  root.addView(note);
+                  gameStatus =
+                          text(
+                                  "게임 폴더를 한 번 선택하면 UniWin 저장공간으로 가져온 뒤 바로 실행할 수 있습니다.",
+                                  14,
+                                  false,
+                                  Color.rgb(176, 184, 197)
+                          );
 
-                  scroll.addView(root);
-                  setContentView(scroll);
+                  gameStatus.setPadding(
+                          0,
+                          dp(8),
+                          0,
+                          dp(14)
+                  );
+
+                  gameCard.addView(
+                          gameStatus
+                  );
+
+                  pickButton =
+                          button(
+                                  "게임 폴더 추가"
+                          );
+
+                  pickButton.setEnabled(
+                          false
+                  );
+
+                  pickButton.setOnClickListener(
+                          v -> selectGameFolder()
+                  );
+
+                  gameCard.addView(
+                          pickButton
+                  );
+
+                  gameCard.addView(
+                          space(9)
+                  );
+
+                  playButton =
+                          button(
+                                  "게임 실행"
+                          );
+
+                  playButton.setEnabled(
+                          false
+                  );
+
+                  playButton.setOnClickListener(
+                          v -> startGame()
+                  );
+
+                  gameCard.addView(
+                          playButton
+                  );
+
+                  root.addView(
+                          gameCard
+                  );
+
+                  root.addView(
+                          space(18)
+                  );
+
+                  TextView note =
+                          text(
+                                  "자동 처리: 게임 파일 가져오기 → EXE 찾기 → 기본 Wine 컨테이너 생성 → DXVK 설정 → 전체화면 실행\n"
+                                          + "현재 버전은 원터치 실행 연결 테스트 버전입니다.",
+                                  12,
+                                  false,
+                                  Color.rgb(112, 121, 136)
+                          );
+
+                  root.addView(
+                          note
+                  );
+
+                  scroll.addView(
+                          root
+                  );
+
+                  setContentView(
+                          scroll
+                  );
               }
 
               private void waitForRuntime() {
-                  final long started = System.currentTimeMillis();
-                  final Runnable[] task = new Runnable[1];
+
+                  final long started =
+                          System.currentTimeMillis();
+
+                  final Runnable[] task =
+                          new Runnable[1];
 
                   task[0] = () -> {
-                      RootFS rootFS = RootFS.find(this);
+
+                      RootFS rootFS =
+                              RootFS.find(this);
+
                       if (rootFS.isValid()) {
-                          engineStatus.setText("준비 완료 · Wine / Box64 / DXVK");
-                          engineStatus.setTextColor(Color.rgb(124, 222, 157));
-                          pickButton.setEnabled(true);
+
+                          engineStatus.setText(
+                                  "준비 완료 · Wine / Box64 / DXVK"
+                          );
+
+                          engineStatus.setTextColor(
+                                  Color.rgb(124, 222, 157)
+                          );
+
+                          pickButton.setEnabled(
+                                  true
+                          );
+
                           return;
                       }
 
-                      long elapsed = System.currentTimeMillis() - started;
+                      long elapsed =
+                              System.currentTimeMillis()
+                                      - started;
+
                       if (elapsed > 180000) {
-                          engineStatus.setText("실행 엔진 초기화 시간이 너무 오래 걸립니다. 앱을 다시 실행해 주세요.");
-                          engineStatus.setTextColor(Color.rgb(255, 150, 150));
+
+                          engineStatus.setText(
+                                  "실행 엔진 초기화 시간이 너무 오래 걸립니다. 앱을 다시 실행해 주세요."
+                          );
+
+                          engineStatus.setTextColor(
+                                  Color.rgb(255, 150, 150)
+                          );
+
                           return;
                       }
 
-                      engineStatus.setText("첫 실행 준비 중… 시스템 파일 설치 중");
-                      main.postDelayed(task[0], 1000);
+                      engineStatus.setText(
+                              "첫 실행 준비 중… 시스템 파일 설치 중"
+                      );
+
+                      main.postDelayed(
+                              task[0],
+                              1000
+                      );
                   };
 
-                  main.post(task[0]);
+                  main.post(
+                          task[0]
+                  );
               }
 
               private void selectGameFolder() {
-                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-                  i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                          Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
-                          Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
-                          Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-                  startActivityForResult(i, PICK_GAME_FOLDER);
+
+                  Intent i =
+                          new Intent(
+                                  Intent.ACTION_OPEN_DOCUMENT_TREE
+                          );
+
+                  i.addFlags(
+                          Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                  | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                  | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                                  | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+                  );
+
+                  startActivityForResult(
+                          i,
+                          PICK_GAME_FOLDER
+                  );
               }
 
               @Override
-              public void onActivityResult(int requestCode, int resultCode, Intent data) {
-                  super.onActivityResult(requestCode, resultCode, data);
+              public void onActivityResult(
+                      int requestCode,
+                      int resultCode,
+                      Intent data
+              ) {
 
-                  if (requestCode != PICK_GAME_FOLDER || resultCode != Activity.RESULT_OK || data == null) return;
+                  super.onActivityResult(
+                          requestCode,
+                          resultCode,
+                          data
+                  );
 
-                  Uri uri = data.getData();
-                  if (uri == null) return;
-
-                  int flags = data.getFlags() &
-                          (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                  try {
-                      getContentResolver().takePersistableUriPermission(uri, flags);
-                  }
-                  catch (Exception ignored) {}
-
-                  DocumentFile folder = DocumentFile.fromTreeUri(this, uri);
-                  if (folder == null || !folder.isDirectory()) {
-                      toast("폴더를 읽지 못했습니다.");
+                  if (
+                          requestCode
+                                  != PICK_GAME_FOLDER
+                                  || resultCode
+                                  != Activity.RESULT_OK
+                                  || data == null
+                  ) {
                       return;
                   }
 
-                  pickButton.setEnabled(false);
-                  playButton.setEnabled(false);
-                  gameStatus.setText("게임 파일 가져오는 중… 큰 게임은 시간이 걸릴 수 있습니다.");
+                  Uri uri =
+                          data.getData();
 
-                  io.execute(() -> importGame(folder));
+                  if (uri == null) {
+                      return;
+                  }
+
+                  int flags =
+                          data.getFlags()
+                                  & (
+                                  Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                          | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                          );
+
+                  try {
+                      getContentResolver()
+                              .takePersistableUriPermission(
+                                      uri,
+                                      flags
+                              );
+                  }
+                  catch (Exception ignored) {
+                  }
+
+                  DocumentFile folder =
+                          DocumentFile.fromTreeUri(
+                                  this,
+                                  uri
+                          );
+
+                  if (
+                          folder == null
+                                  || !folder.isDirectory()
+                  ) {
+
+                      toast(
+                              "폴더를 읽지 못했습니다."
+                      );
+
+                      return;
+                  }
+
+                  pickButton.setEnabled(
+                          false
+                  );
+
+                  playButton.setEnabled(
+                          false
+                  );
+
+                  gameStatus.setText(
+                          "게임 파일 가져오는 중… 큰 게임은 시간이 걸릴 수 있습니다."
+                  );
+
+                  io.execute(
+                          () -> importGame(folder)
+                  );
               }
 
-              private void importGame(DocumentFile folder) {
-                  try {
-                      File gamesRoot = new File(getExternalFilesDir(null), "games");
-                      if (!gamesRoot.exists()) gamesRoot.mkdirs();
+              private void importGame(
+                      DocumentFile folder
+              ) {
 
-                      String safeName = sanitize(folder.getName() != null ? folder.getName() : "game");
-                      File dst = new File(gamesRoot, safeName + "-" + System.currentTimeMillis());
+                  try {
+
+                      File base =
+                              getExternalFilesDir(
+                                      null
+                              );
+
+                      if (base == null) {
+                          base = getFilesDir();
+                      }
+
+                      File gamesRoot =
+                              new File(
+                                      base,
+                                      "games"
+                              );
+
+                      if (
+                              !gamesRoot.exists()
+                                      && !gamesRoot.mkdirs()
+                      ) {
+                          throw new IllegalStateException(
+                                  "Unable to create games directory"
+                          );
+                      }
+
+                      String safeName =
+                              sanitize(
+                                      folder.getName()
+                                              != null
+                                              ? folder.getName()
+                                              : "game"
+                              );
+
+                      File dst =
+                              new File(
+                                      gamesRoot,
+                                      safeName
+                                              + "-"
+                                              + System.currentTimeMillis()
+                              );
+
                       dst.mkdirs();
 
-                      List<File> exes = new ArrayList<>();
-                      copyTree(folder, dst, exes, 0);
+                      List<File> exes =
+                              new ArrayList<>();
 
-                      File exe = chooseExe(exes, dst.getName());
+                      copyTree(
+                              folder,
+                              dst,
+                              exes,
+                              0
+                      );
+
+                      File exe =
+                              chooseExe(
+                                      exes,
+                                      dst.getName()
+                              );
+
                       if (exe == null) {
-                          main.post(() -> {
-                              gameStatus.setText("EXE 파일을 찾지 못했습니다.");
-                              pickButton.setEnabled(true);
-                          });
+
+                          main.post(
+                                  () -> {
+                                      gameStatus.setText(
+                                              "EXE 파일을 찾지 못했습니다."
+                                      );
+
+                                      pickButton.setEnabled(
+                                              true
+                                      );
+                                  }
+                          );
+
                           return;
                       }
 
-                      importedGameDir = dst;
-                      importedExe = exe;
+                      importedGameDir =
+                              dst;
 
-                      String details = analyzeGame(dst, exe);
+                      importedExe =
+                              exe;
 
-                      main.post(() -> {
-                          gameStatus.setText(details);
-                          pickButton.setEnabled(true);
-                          playButton.setEnabled(true);
-                      });
+                      String details =
+                              analyzeGame(
+                                      dst,
+                                      exe
+                              );
+
+                      main.post(
+                              () -> {
+                                  gameStatus.setText(
+                                          details
+                                  );
+
+                                  pickButton.setEnabled(
+                                          true
+                                  );
+
+                                  playButton.setEnabled(
+                                          true
+                                  );
+                              }
+                      );
                   }
                   catch (Exception e) {
-                      main.post(() -> {
-                          gameStatus.setText("게임 가져오기 실패: " + e.getClass().getSimpleName());
-                          pickButton.setEnabled(true);
-                      });
+
+                      main.post(
+                              () -> {
+                                  gameStatus.setText(
+                                          "게임 가져오기 실패: "
+                                                  + e.getClass()
+                                                  .getSimpleName()
+                                  );
+
+                                  pickButton.setEnabled(
+                                          true
+                                  );
+                              }
+                      );
                   }
               }
 
-              private void copyTree(DocumentFile src, File dst, List<File> exes, int depth) throws Exception {
-                  if (depth > 12) return;
+              private void copyTree(
+                      DocumentFile src,
+                      File dst,
+                      List<File> exes,
+                      int depth
+              ) throws Exception {
 
-                  for (DocumentFile item : src.listFiles()) {
-                      String name = item.getName();
-                      if (name == null) continue;
+                  if (depth > 12) {
+                      return;
+                  }
 
-                      File out = new File(dst, sanitize(name));
+                  for (
+                          DocumentFile item
+                                  : src.listFiles()
+                  ) {
+
+                      String name =
+                              item.getName();
+
+                      if (name == null) {
+                          continue;
+                      }
+
+                      File out =
+                              new File(
+                                      dst,
+                                      sanitize(name)
+                              );
 
                       if (item.isDirectory()) {
-                          if (!out.exists()) out.mkdirs();
-                          copyTree(item, out, exes, depth + 1);
-                      }
-                      else if (item.isFile()) {
-                          try (InputStream in = getContentResolver().openInputStream(item.getUri());
-                               FileOutputStream fos = new FileOutputStream(out)) {
-                              if (in == null) continue;
-                              byte[] buf = new byte[1024 * 1024];
-                              int n;
-                              while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
+
+                          if (!out.exists()) {
+                              out.mkdirs();
                           }
 
-                          if (name.toLowerCase(Locale.ROOT).endsWith(".exe")) {
-                              exes.add(out);
+                          copyTree(
+                                  item,
+                                  out,
+                                  exes,
+                                  depth + 1
+                          );
+                      }
+                      else if (item.isFile()) {
+
+                          try (
+                                  InputStream in =
+                                          getContentResolver()
+                                                  .openInputStream(
+                                                          item.getUri()
+                                                  );
+
+                                  FileOutputStream fos =
+                                          new FileOutputStream(
+                                                  out
+                                          )
+                          ) {
+
+                              if (in == null) {
+                                  continue;
+                              }
+
+                              byte[] buf =
+                                      new byte[
+                                              1024 * 1024
+                                              ];
+
+                              int n;
+
+                              while (
+                                      (n = in.read(buf))
+                                              > 0
+                              ) {
+
+                                  fos.write(
+                                          buf,
+                                          0,
+                                          n
+                                  );
+                              }
+                          }
+
+                          if (
+                                  name
+                                          .toLowerCase(
+                                                  Locale.ROOT
+                                          )
+                                          .endsWith(
+                                                  ".exe"
+                                          )
+                          ) {
+
+                              exes.add(
+                                      out
+                              );
                           }
                       }
                   }
               }
 
-              private File chooseExe(List<File> exes, String folderName) {
-                  if (exes.isEmpty()) return null;
+              private File chooseExe(
+                      List<File> exes,
+                      String folderName
+              ) {
 
-                  for (File f : exes) {
-                      String parent = f.getParentFile() != null ? f.getParentFile().getName() : "";
-                      if (parent.equals(folderName)) return f;
+                  if (exes.isEmpty()) {
+                      return null;
                   }
 
-                  File best = exes.get(0);
-                  int bestDepth = pathDepth(best);
+                  for (
+                          File f
+                                  : exes
+                  ) {
 
-                  for (File f : exes) {
-                      String low = f.getName().toLowerCase(Locale.ROOT);
-                      if (low.contains("crash") || low.contains("unins") || low.contains("unitycrashhandler")) continue;
+                      String parent =
+                              f.getParentFile()
+                                      != null
+                                      ? f.getParentFile()
+                                      .getName()
+                                      : "";
 
-                      int d = pathDepth(f);
-                      if (d < bestDepth) {
-                          best = f;
-                          bestDepth = d;
+                      if (
+                              parent.equals(
+                                      folderName
+                              )
+                      ) {
+                          return f;
                       }
                   }
+
+                  File best =
+                          exes.get(0);
+
+                  int bestDepth =
+                          pathDepth(best);
+
+                  for (
+                          File f
+                                  : exes
+                  ) {
+
+                      String low =
+                              f.getName()
+                                      .toLowerCase(
+                                              Locale.ROOT
+                                      );
+
+                      if (
+                              low.contains(
+                                      "crash"
+                              )
+                                      || low.contains(
+                                      "unins"
+                              )
+                                      || low.contains(
+                                      "unitycrashhandler"
+                              )
+                      ) {
+                          continue;
+                      }
+
+                      int d =
+                              pathDepth(f);
+
+                      if (
+                              d
+                                      < bestDepth
+                      ) {
+
+                          best =
+                                  f;
+
+                          bestDepth =
+                                  d;
+                      }
+                  }
+
                   return best;
               }
 
-              private int pathDepth(File f) {
+              private int pathDepth(
+                      File f
+              ) {
+
                   int d = 0;
-                  File p = f;
-                  while (p != null) {
+
+                  File p =
+                          f;
+
+                  while (
+                          p != null
+                  ) {
+
                       d++;
-                      p = p.getParentFile();
+
+                      p =
+                              p.getParentFile();
                   }
+
                   return d;
               }
 
-              private String analyzeGame(File dir, File exe) {
-                  boolean unity = new File(dir, "UnityPlayer.dll").exists();
-                  boolean il2cpp = new File(dir, "GameAssembly.dll").exists();
-                  boolean bepinex = new File(dir, "BepInEx").isDirectory();
-                  boolean doorstop = new File(dir, "doorstop_config.ini").exists() || new File(dir, "winhttp.dll").exists();
+              private String analyzeGame(
+                      File dir,
+                      File exe
+              ) {
 
-                  StringBuilder sb = new StringBuilder();
-                  sb.append(exe.getName()).append("\n");
-                  sb.append("준비 완료");
-                  if (unity) sb.append(" · Unity");
-                  if (il2cpp) sb.append(" · IL2CPP");
-                  if (bepinex) sb.append(" · BepInEx");
-                  if (doorstop) sb.append(" · Doorstop");
+                  boolean unity =
+                          new File(
+                                  dir,
+                                  "UnityPlayer.dll"
+                          ).exists();
+
+                  boolean il2cpp =
+                          new File(
+                                  dir,
+                                  "GameAssembly.dll"
+                          ).exists();
+
+                  boolean bepinex =
+                          new File(
+                                  dir,
+                                  "BepInEx"
+                          ).isDirectory();
+
+                  boolean doorstop =
+                          new File(
+                                  dir,
+                                  "doorstop_config.ini"
+                          ).exists()
+                                  || new File(
+                                  dir,
+                                  "winhttp.dll"
+                          ).exists();
+
+                  StringBuilder sb =
+                          new StringBuilder();
+
+                  sb.append(
+                          exe.getName()
+                  );
+
+                  sb.append(
+                          "\n"
+                  );
+
+                  sb.append(
+                          "준비 완료"
+                  );
+
+                  if (unity) {
+                      sb.append(
+                              " · Unity"
+                      );
+                  }
+
+                  if (il2cpp) {
+                      sb.append(
+                              " · IL2CPP"
+                      );
+                  }
+
+                  if (bepinex) {
+                      sb.append(
+                              " · BepInEx"
+                      );
+                  }
+
+                  if (doorstop) {
+                      sb.append(
+                              " · Doorstop"
+                      );
+                  }
+
                   return sb.toString();
               }
 
               private void startGame() {
-                  if (importedExe == null || !importedExe.isFile()) {
-                      toast("먼저 게임을 추가해 주세요.");
+
+                  if (
+                          importedExe == null
+                                  || !importedExe.isFile()
+                  ) {
+
+                      toast(
+                              "먼저 게임을 추가해 주세요."
+                      );
+
                       return;
                   }
 
-                  if (!RootFS.find(this).isValid()) {
-                      toast("실행 엔진이 아직 준비되지 않았습니다.");
+                  if (
+                          !RootFS.find(this)
+                                  .isValid()
+                  ) {
+
+                      toast(
+                              "실행 엔진이 아직 준비되지 않았습니다."
+                      );
+
                       return;
                   }
 
-                  playButton.setEnabled(false);
-                  gameStatus.setText("Windows 실행환경 준비 중…");
+                  playButton.setEnabled(
+                          false
+                  );
+
+                  gameStatus.setText(
+                          "Windows 실행환경 준비 중…"
+                  );
 
                   try {
-                      ContainerManager manager = new ContainerManager(this);
-                      List<Container> containers = manager.getContainers();
 
-                      if (!containers.isEmpty()) {
-                          launchWithContainer(containers.get(0));
+                      ContainerManager manager =
+                              new ContainerManager(
+                                      this
+                              );
+
+                      List<Container> containers =
+                              manager.getContainers();
+
+                      if (
+                              !containers.isEmpty()
+                      ) {
+
+                          launchWithContainer(
+                                  containers.get(0)
+                          );
+
                           return;
                       }
 
-                      JSONObject data = new JSONObject();
-                      data.put("name", "UniWin Game");
-                      data.put("screenSize", "1280x720");
+                      JSONObject data =
+                              new JSONObject();
 
-                      manager.createContainerAsync(data, container -> {
-                          if (container == null) {
-                              gameStatus.setText("Wine 컨테이너 생성에 실패했습니다.");
-                              playButton.setEnabled(true);
-                              return;
-                          }
-                          launchWithContainer(container);
-                      });
+                      data.put(
+                              "name",
+                              "UniWin Game"
+                      );
+
+                      data.put(
+                              "screenSize",
+                              Container.DEFAULT_SCREEN_SIZE
+                      );
+
+                      data.put(
+                              "envVars",
+                              Container.DEFAULT_ENV_VARS
+                      );
+
+                      data.put(
+                              "dxwrapper",
+                              Container.DEFAULT_DXWRAPPER
+                      );
+
+                      data.put(
+                              "audioDriver",
+                              Container.DEFAULT_AUDIO_DRIVER
+                      );
+
+                      data.put(
+                              "wincomponents",
+                              Container.DEFAULT_WINCOMPONENTS
+                      );
+
+                      data.put(
+                              "drives",
+                              Container.DEFAULT_DRIVES
+                      );
+
+                      data.put(
+                              "startupSelection",
+                              Container.STARTUP_SELECTION_ESSENTIAL
+                      );
+
+                      manager.createContainerAsync(
+                              data,
+                              container -> {
+
+                                  if (
+                                          container == null
+                                  ) {
+
+                                      gameStatus.setText(
+                                              "Wine 컨테이너 생성에 실패했습니다."
+                                      );
+
+                                      playButton.setEnabled(
+                                              true
+                                      );
+
+                                      return;
+                                  }
+
+                                  launchWithContainer(
+                                          container
+                                  );
+                              }
+                      );
                   }
                   catch (Exception e) {
-                      gameStatus.setText("실행 준비 실패: " + e.getClass().getSimpleName());
-                      playButton.setEnabled(true);
+
+                      gameStatus.setText(
+                              "실행 준비 실패: "
+                                      + e.getClass()
+                                      .getSimpleName()
+                      );
+
+                      playButton.setEnabled(
+                              true
+                      );
                   }
               }
 
-              private void launchWithContainer(Container container) {
-                  runOnUiThread(() -> {
-                      try {
-                          Intent intent = new Intent(this, XServerDisplayActivity.class);
-                          intent.putExtra("container_id", container.id);
-                          intent.putExtra("exec_path", importedExe.getAbsolutePath());
-                          startActivity(intent);
-                          playButton.setEnabled(true);
-                          gameStatus.setText(importedExe.getName() + "\n실행 요청 완료");
-                      }
-                      catch (Exception e) {
-                          gameStatus.setText("게임 실행 실패: " + e.getClass().getSimpleName());
-                          playButton.setEnabled(true);
-                      }
-                  });
+              private void launchWithContainer(
+                      Container container
+              ) {
+
+                  runOnUiThread(
+                          () -> {
+
+                              try {
+
+                                  Intent intent =
+                                          new Intent(
+                                                  this,
+                                                  XServerDisplayActivity.class
+                                          );
+
+                                  intent.putExtra(
+                                          "container_id",
+                                          container.id
+                                  );
+
+                                  intent.putExtra(
+                                          "exec_path",
+                                          importedExe
+                                                  .getAbsolutePath()
+                                  );
+
+                                  startActivity(
+                                          intent
+                                  );
+
+                                  playButton.setEnabled(
+                                          true
+                                  );
+
+                                  gameStatus.setText(
+                                          importedExe.getName()
+                                                  + "\n실행 요청 완료"
+                                  );
+                              }
+                              catch (Exception e) {
+
+                                  gameStatus.setText(
+                                          "게임 실행 실패: "
+                                                  + e.getClass()
+                                                  .getSimpleName()
+                                  );
+
+                                  playButton.setEnabled(
+                                          true
+                                  );
+                              }
+                          }
+                  );
               }
 
-              private String sanitize(String s) {
-                  return s.replaceAll("[\\\\/:*?\"<>|]", "_");
+              private String sanitize(
+                      String s
+              ) {
+
+                  return s.replaceAll(
+                          "[\\\\/:*?\"<>|]",
+                          "_"
+                  );
               }
 
               private LinearLayout card() {
-                  LinearLayout x = new LinearLayout(this);
-                  x.setOrientation(LinearLayout.VERTICAL);
-                  x.setPadding(dp(18), dp(18), dp(18), dp(18));
+
+                  LinearLayout x =
+                          new LinearLayout(
+                                  this
+                          );
+
+                  x.setOrientation(
+                          LinearLayout.VERTICAL
+                  );
+
+                  x.setPadding(
+                          dp(18),
+                          dp(18),
+                          dp(18),
+                          dp(18)
+                  );
 
                   android.graphics.drawable.GradientDrawable bg =
                           new android.graphics.drawable.GradientDrawable();
-                  bg.setColor(Color.rgb(20, 25, 34));
-                  bg.setCornerRadius(dp(18));
-                  bg.setStroke(dp(1), Color.rgb(46, 55, 70));
-                  x.setBackground(bg);
+
+                  bg.setColor(
+                          Color.rgb(
+                                  20,
+                                  25,
+                                  34
+                          )
+                  );
+
+                  bg.setCornerRadius(
+                          dp(18)
+                  );
+
+                  bg.setStroke(
+                          dp(1),
+                          Color.rgb(
+                                  46,
+                                  55,
+                                  70
+                          )
+                  );
+
+                  x.setBackground(
+                          bg
+                  );
+
                   return x;
               }
 
-              private Button button(String label) {
-                  Button b = new Button(this);
-                  b.setText(label);
-                  b.setTextSize(15);
-                  b.setAllCaps(false);
-                  b.setTextColor(Color.WHITE);
-                  b.setMinHeight(dp(50));
+              private Button button(
+                      String label
+              ) {
+
+                  Button b =
+                          new Button(
+                                  this
+                          );
+
+                  b.setText(
+                          label
+                  );
+
+                  b.setTextSize(
+                          15
+                  );
+
+                  b.setAllCaps(
+                          false
+                  );
+
+                  b.setTextColor(
+                          Color.WHITE
+                  );
+
+                  b.setMinHeight(
+                          dp(50)
+                  );
 
                   android.graphics.drawable.GradientDrawable bg =
                           new android.graphics.drawable.GradientDrawable();
-                  bg.setColor(Color.rgb(58, 84, 150));
-                  bg.setCornerRadius(dp(13));
-                  b.setBackground(bg);
+
+                  bg.setColor(
+                          Color.rgb(
+                                  58,
+                                  84,
+                                  150
+                          )
+                  );
+
+                  bg.setCornerRadius(
+                          dp(13)
+                  );
+
+                  b.setBackground(
+                          bg
+                  );
+
                   return b;
               }
 
-              private TextView text(String value, int sp, boolean bold, int color) {
-                  TextView t = new TextView(this);
-                  t.setText(value);
-                  t.setTextSize(sp);
-                  t.setTextColor(color);
-                  if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
+              private TextView text(
+                      String value,
+                      int sp,
+                      boolean bold,
+                      int color
+              ) {
+
+                  TextView t =
+                          new TextView(
+                                  this
+                          );
+
+                  t.setText(
+                          value
+                  );
+
+                  t.setTextSize(
+                          sp
+                  );
+
+                  t.setTextColor(
+                          color
+                  );
+
+                  if (bold) {
+                      t.setTypeface(
+                              Typeface.DEFAULT_BOLD
+                      );
+                  }
+
                   return t;
               }
 
-              private View space(int h) {
-                  View v = new View(this);
-                  v.setLayoutParams(new LinearLayout.LayoutParams(1, dp(h)));
+              private View space(
+                      int h
+              ) {
+
+                  View v =
+                          new View(
+                                  this
+                          );
+
+                  v.setLayoutParams(
+                          new LinearLayout.LayoutParams(
+                                  1,
+                                  dp(h)
+                          )
+                  );
+
                   return v;
               }
 
-              private int dp(int value) {
-                  return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
+              private int dp(
+                      int value
+              ) {
+
+                  return (int) (
+                          value
+                                  * getResources()
+                                  .getDisplayMetrics()
+                                  .density
+                                  + 0.5f
+                  );
               }
 
-              private void toast(String s) {
-                  Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+              private void toast(
+                      String s
+              ) {
+
+                  Toast.makeText(
+                          this,
+                          s,
+                          Toast.LENGTH_SHORT
+                  ).show();
               }
           }
           EOF
 
-          grep -RIl '>Winlator<' app/src/main/res/values 2>/dev/null | while read -r f; do
-            sed -i 's/>Winlator</>UniWin</g' "$f" || true
+          grep -RIl '>Winlator<' \
+            app/src/main/res/values \
+            2>/dev/null \
+            | while read -r f
+          do
+
+            sed -i \
+              's/>Winlator</>UniWin</g' \
+              "$f" \
+              || true
+
           done
 
-          cp LICENSE UNIWIN_UPSTREAM_LGPL_LICENSE.txt
+          cp \
+            LICENSE \
+            UNIWIN_UPSTREAM_LGPL_LICENSE.txt
 
       - name: Build UniWin APK
         shell: bash
         run: |
           set -e
+
           cd runtime-src
+
           chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug --stacktrace
+
+          ./gradlew \
+            --no-daemon \
+            assembleDebug \
+            --stacktrace
 
       - name: Prepare output
         shell: bash
         run: |
           set -e
+
           mkdir -p output
-          APK="$(find runtime-src/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
-          test -n "$APK" || (echo "APK not found" && exit 1)
-          cp "$APK" output/UniWin-0.5-One-Tap.apk
-          cp runtime-src/UNIWIN_UPSTREAM_LGPL_LICENSE.txt output/
+
+          APK="$(
+            find runtime-src/app/build/outputs/apk \
+              -type f \
+              -name '*.apk' \
+              | head -n 1
+          )"
+
+          test -n "$APK" || (
+            echo "APK not found"
+            exit 1
+          )
+
+          cp \
+            "$APK" \
+            output/UniWin-0.5.1-Stable-Launcher.apk
+
+          cp \
+            runtime-src/UNIWIN_UPSTREAM_LGPL_LICENSE.txt \
+            output/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UniWin-0.5-one-tap
+          name: UniWin-0.5.1-stable-launcher
           path: output/*
           if-no-files-found: error
           retention-days: 30
-
