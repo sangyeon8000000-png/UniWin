@@ -1,4 +1,4 @@
-name: Build UniWin 0.4.1 Custom UI
+name: Build UniWin 0.5 One Tap
 
 on:
   workflow_dispatch:
@@ -52,22 +52,26 @@ jobs:
             "ndk;24.0.8215888" \
             "cmake;3.22.1"
 
-      - name: Clone Winlator runtime
+      - name: Clone runtime engine
         shell: bash
         run: |
           set -e
           git clone --depth 1 https://github.com/brunodev85/winlator-app.git runtime-src
 
-      - name: Add UniWin custom launcher
+      - name: Build UniWin launcher layer
         shell: bash
         run: |
           set -e
           cd runtime-src
 
           sed -i "s/applicationId 'com.winlator'/applicationId 'com.uniwin.runtime'/" app/build.gradle
-          sed -i 's/versionName "11.2"/versionName "0.4.1-custom-ui"/' app/build.gradle
-          sed -i 's/versionCode 33/versionCode 41/' app/build.gradle
+          sed -i 's/versionCode 33/versionCode 50/' app/build.gradle
+          sed -i 's/versionName "11.2"/versionName "0.5-one-tap"/' app/build.gradle
           sed -i 's/android:authorities="com.winlator.FileProvider"/android:authorities="com.uniwin.runtime.FileProvider"/' app/src/main/AndroidManifest.xml
+
+          if ! grep -q 'androidx.documentfile' app/build.gradle; then
+            sed -i "/dependencies {/a\\    implementation 'androidx.documentfile:documentfile:1.0.1'" app/build.gradle
+          fi
 
           python3 - <<'PY'
           from pathlib import Path
@@ -80,7 +84,6 @@ jobs:
               r'<activity\s+android:name="com\.winlator\.MainActivity".*?</activity>',
               re.DOTALL
           )
-
           replacement = '''<activity android:name="com.winlator.MainActivity"
               android:theme="@style/AppThemeDark"
               android:exported="false"
@@ -97,12 +100,10 @@ jobs:
                   <category android:name="android.intent.category.LAUNCHER"/>
               </intent-filter>
           </activity>'''
-
-          new_s, count = pattern.subn(replacement, s, count=1)
+          s2, count = pattern.subn(replacement, s, count=1)
           if count != 1:
-              raise SystemExit(f"MainActivity manifest block replacement failed: count={count}")
-
-          p.write_text(new_s)
+              raise SystemExit(f"MainActivity manifest patch failed: {count}")
+          p.write_text(s2)
           PY
 
           cat > app/src/main/java/com/winlator/UniWinHomeActivity.java <<'EOF'
@@ -114,104 +115,159 @@ jobs:
           import android.graphics.Typeface;
           import android.net.Uri;
           import android.os.Bundle;
-          import android.provider.Settings;
+          import android.os.Handler;
+          import android.os.Looper;
           import android.view.View;
           import android.widget.Button;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.TextView;
+          import android.widget.Toast;
 
           import androidx.documentfile.provider.DocumentFile;
 
+          import com.winlator.container.Container;
+          import com.winlator.container.ContainerManager;
+          import com.winlator.xenvironment.RootFS;
+
+          import org.json.JSONObject;
+
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
           import java.util.ArrayList;
           import java.util.List;
           import java.util.Locale;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
 
-          public class UniWinHomeActivity extends Activity {
-              private static final int PICK_GAME_FOLDER = 4104;
-              private TextView gameInfo;
+          public class UniWinHomeActivity extends MainActivity {
+              private static final int PICK_GAME_FOLDER = 5001;
+
+              private final ExecutorService io = Executors.newSingleThreadExecutor();
+              private final Handler main = new Handler(Looper.getMainLooper());
+
+              private TextView engineStatus;
+              private TextView gameStatus;
+              private Button pickButton;
+              private Button playButton;
+
+              private File importedGameDir;
+              private File importedExe;
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+                  buildUniWinUI();
+                  waitForRuntime();
+              }
 
-                  getWindow().setStatusBarColor(Color.rgb(12, 15, 22));
-                  getWindow().setNavigationBarColor(Color.rgb(12, 15, 22));
+              @Override
+              public void onBackPressed() {
+                  finish();
+              }
+
+              private void buildUniWinUI() {
+                  getWindow().setStatusBarColor(Color.rgb(8, 11, 17));
+                  getWindow().setNavigationBarColor(Color.rgb(8, 11, 17));
 
                   ScrollView scroll = new ScrollView(this);
-                  scroll.setBackgroundColor(Color.rgb(12, 15, 22));
+                  scroll.setBackgroundColor(Color.rgb(8, 11, 17));
 
                   LinearLayout root = new LinearLayout(this);
                   root.setOrientation(LinearLayout.VERTICAL);
                   root.setPadding(dp(20), dp(20), dp(20), dp(28));
 
-                  TextView brand = text("UNIWIN", 30, true, Color.WHITE);
-                  TextView tagline = text("Windows games, simplified.", 15, false, Color.rgb(156, 163, 175));
-                  tagline.setPadding(0, dp(4), 0, dp(24));
-                  root.addView(brand);
-                  root.addView(tagline);
+                  root.addView(text("UNIWIN", 32, true, Color.WHITE));
+                  TextView sub = text("게임을 고르면 실행환경은 UniWin이 준비합니다.", 14, false, Color.rgb(155, 164, 178));
+                  sub.setPadding(0, dp(6), 0, dp(22));
+                  root.addView(sub);
 
-                  root.addView(sectionTitle("게임 라이브러리"));
+                  LinearLayout runtimeCard = card();
+                  runtimeCard.addView(text("실행 엔진", 17, true, Color.WHITE));
+                  engineStatus = text("Wine / Box64 / DXVK 준비 상태 확인 중…", 13, false, Color.rgb(170, 177, 190));
+                  engineStatus.setPadding(0, dp(7), 0, 0);
+                  runtimeCard.addView(engineStatus);
+                  root.addView(runtimeCard);
 
-                  LinearLayout card = card();
-                  TextView gameTitle = text("게임을 추가하세요", 20, true, Color.WHITE);
-                  gameInfo = text("폴더를 선택하면 EXE와 Unity 구성요소를 자동으로 분석합니다.", 14, false, Color.rgb(180, 187, 199));
-                  gameInfo.setPadding(0, dp(8), 0, dp(14));
+                  root.addView(space(16));
 
-                  Button addGame = button("＋ 게임 폴더 선택");
-                  addGame.setOnClickListener(v -> {
-                      Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-                      intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                              Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
-                              Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
-                              Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-                      startActivityForResult(intent, PICK_GAME_FOLDER);
-                  });
+                  LinearLayout gameCard = card();
+                  gameCard.addView(text("내 게임", 18, true, Color.WHITE));
 
-                  Button openRuntime = button("Windows 실행환경 열기");
-                  openRuntime.setOnClickListener(v ->
-                          startActivity(new Intent(this, MainActivity.class)));
+                  gameStatus = text(
+                          "게임 폴더를 한 번 선택하면 UniWin 저장공간으로 가져온 뒤 바로 실행할 수 있습니다.",
+                          14, false, Color.rgb(176, 184, 197));
+                  gameStatus.setPadding(0, dp(8), 0, dp(14));
+                  gameCard.addView(gameStatus);
 
-                  card.addView(gameTitle);
-                  card.addView(gameInfo);
-                  card.addView(addGame);
-                  card.addView(space(8));
-                  card.addView(openRuntime);
-                  root.addView(card);
+                  pickButton = button("게임 폴더 추가");
+                  pickButton.setEnabled(false);
+                  pickButton.setOnClickListener(v -> selectGameFolder());
+                  gameCard.addView(pickButton);
 
-                  root.addView(space(20));
-                  root.addView(sectionTitle("빠른 설정"));
+                  gameCard.addView(space(9));
 
-                  LinearLayout quick = card();
-                  TextView runtime = text("실행 엔진", 16, true, Color.WHITE);
-                  TextView runtimeDesc = text("Wine / Box64 / DXVK 기반 런타임", 13, false, Color.rgb(160, 168, 180));
-                  runtimeDesc.setPadding(0, dp(4), 0, dp(12));
-                  Button androidSettings = button("앱 설정 열기");
-                  androidSettings.setOnClickListener(v -> {
-                      Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-                      i.setData(Uri.parse("package:" + getPackageName()));
-                      startActivity(i);
-                  });
-                  quick.addView(runtime);
-                  quick.addView(runtimeDesc);
-                  quick.addView(androidSettings);
-                  root.addView(quick);
+                  playButton = button("게임 실행");
+                  playButton.setEnabled(false);
+                  playButton.setOnClickListener(v -> startGame());
+                  gameCard.addView(playButton);
 
-                  root.addView(space(20));
+                  root.addView(gameCard);
+
+                  root.addView(space(18));
+
                   TextView note = text(
-                          "0.4: UniWin 전용 홈 UI + 게임 자동 분석 + Winlator 런타임 연결\n" +
-                          "다음 단계에서는 선택한 EXE를 원터치 실행으로 연결합니다.",
-                          12, false, Color.rgb(120, 128, 142));
+                          "자동 처리: 게임 파일 가져오기 → EXE 찾기 → 기본 Wine 컨테이너 생성 → DXVK 설정 → 전체화면 실행\n" +
+                          "현재 0.5는 이 원터치 실행 흐름을 처음 연결하는 테스트 버전입니다.",
+                          12, false, Color.rgb(112, 121, 136));
                   root.addView(note);
 
                   scroll.addView(root);
                   setContentView(scroll);
               }
 
+              private void waitForRuntime() {
+                  final long started = System.currentTimeMillis();
+                  final Runnable[] task = new Runnable[1];
+
+                  task[0] = () -> {
+                      RootFS rootFS = RootFS.find(this);
+                      if (rootFS.isValid()) {
+                          engineStatus.setText("준비 완료 · Wine / Box64 / DXVK");
+                          engineStatus.setTextColor(Color.rgb(124, 222, 157));
+                          pickButton.setEnabled(true);
+                          return;
+                      }
+
+                      long elapsed = System.currentTimeMillis() - started;
+                      if (elapsed > 180000) {
+                          engineStatus.setText("실행 엔진 초기화 시간이 너무 오래 걸립니다. 앱을 다시 실행해 주세요.");
+                          engineStatus.setTextColor(Color.rgb(255, 150, 150));
+                          return;
+                      }
+
+                      engineStatus.setText("첫 실행 준비 중… 시스템 파일 설치 중");
+                      main.postDelayed(task[0], 1000);
+                  };
+
+                  main.post(task[0]);
+              }
+
+              private void selectGameFolder() {
+                  Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                  i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                          Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                          Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
+                          Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                  startActivityForResult(i, PICK_GAME_FOLDER);
+              }
+
               @Override
-              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+              public void onActivityResult(int requestCode, int resultCode, Intent data) {
                   super.onActivityResult(requestCode, resultCode, data);
-                  if (requestCode != PICK_GAME_FOLDER || resultCode != RESULT_OK || data == null) return;
+
+                  if (requestCode != PICK_GAME_FOLDER || resultCode != Activity.RESULT_OK || data == null) return;
 
                   Uri uri = data.getData();
                   if (uri == null) return;
@@ -220,59 +276,216 @@ jobs:
                           (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                   try {
                       getContentResolver().takePersistableUriPermission(uri, flags);
-                  } catch (Exception ignored) {}
+                  }
+                  catch (Exception ignored) {}
 
                   DocumentFile folder = DocumentFile.fromTreeUri(this, uri);
                   if (folder == null || !folder.isDirectory()) {
-                      gameInfo.setText("폴더를 읽지 못했습니다.");
+                      toast("폴더를 읽지 못했습니다.");
                       return;
                   }
 
-                  List<String> exes = new ArrayList<>();
-                  boolean unity = false;
-                  boolean il2cpp = false;
-                  boolean bepinex = false;
-                  boolean doorstop = false;
+                  pickButton.setEnabled(false);
+                  playButton.setEnabled(false);
+                  gameStatus.setText("게임 파일 가져오는 중… 큰 게임은 시간이 걸릴 수 있습니다.");
 
-                  for (DocumentFile f : folder.listFiles()) {
-                      String name = f.getName();
+                  io.execute(() -> importGame(folder));
+              }
+
+              private void importGame(DocumentFile folder) {
+                  try {
+                      File gamesRoot = new File(getExternalFilesDir(null), "games");
+                      if (!gamesRoot.exists()) gamesRoot.mkdirs();
+
+                      String safeName = sanitize(folder.getName() != null ? folder.getName() : "game");
+                      File dst = new File(gamesRoot, safeName + "-" + System.currentTimeMillis());
+                      dst.mkdirs();
+
+                      List<File> exes = new ArrayList<>();
+                      copyTree(folder, dst, exes, 0);
+
+                      File exe = chooseExe(exes, dst.getName());
+                      if (exe == null) {
+                          main.post(() -> {
+                              gameStatus.setText("EXE 파일을 찾지 못했습니다.");
+                              pickButton.setEnabled(true);
+                          });
+                          return;
+                      }
+
+                      importedGameDir = dst;
+                      importedExe = exe;
+
+                      String details = analyzeGame(dst, exe);
+
+                      main.post(() -> {
+                          gameStatus.setText(details);
+                          pickButton.setEnabled(true);
+                          playButton.setEnabled(true);
+                      });
+                  }
+                  catch (Exception e) {
+                      main.post(() -> {
+                          gameStatus.setText("게임 가져오기 실패: " + e.getClass().getSimpleName());
+                          pickButton.setEnabled(true);
+                      });
+                  }
+              }
+
+              private void copyTree(DocumentFile src, File dst, List<File> exes, int depth) throws Exception {
+                  if (depth > 12) return;
+
+                  for (DocumentFile item : src.listFiles()) {
+                      String name = item.getName();
                       if (name == null) continue;
-                      String low = name.toLowerCase(Locale.ROOT);
 
-                      if (f.isFile() && low.endsWith(".exe")) exes.add(name);
-                      if (f.isFile() && low.equals("unityplayer.dll")) unity = true;
-                      if (f.isFile() && low.equals("gameassembly.dll")) il2cpp = true;
-                      if (f.isDirectory() && low.equals("bepinex")) bepinex = true;
-                      if (f.isFile() && (low.equals("doorstop_config.ini") || low.equals("winhttp.dll"))) doorstop = true;
+                      File out = new File(dst, sanitize(name));
+
+                      if (item.isDirectory()) {
+                          if (!out.exists()) out.mkdirs();
+                          copyTree(item, out, exes, depth + 1);
+                      }
+                      else if (item.isFile()) {
+                          try (InputStream in = getContentResolver().openInputStream(item.getUri());
+                               FileOutputStream fos = new FileOutputStream(out)) {
+                              if (in == null) continue;
+                              byte[] buf = new byte[1024 * 1024];
+                              int n;
+                              while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
+                          }
+
+                          if (name.toLowerCase(Locale.ROOT).endsWith(".exe")) {
+                              exes.add(out);
+                          }
+                      }
+                  }
+              }
+
+              private File chooseExe(List<File> exes, String folderName) {
+                  if (exes.isEmpty()) return null;
+
+                  for (File f : exes) {
+                      String parent = f.getParentFile() != null ? f.getParentFile().getName() : "";
+                      if (parent.equals(folderName)) return f;
                   }
 
+                  File best = exes.get(0);
+                  int bestDepth = pathDepth(best);
+
+                  for (File f : exes) {
+                      String low = f.getName().toLowerCase(Locale.ROOT);
+                      if (low.contains("crash") || low.contains("unins") || low.contains("unitycrashhandler")) continue;
+
+                      int d = pathDepth(f);
+                      if (d < bestDepth) {
+                          best = f;
+                          bestDepth = d;
+                      }
+                  }
+                  return best;
+              }
+
+              private int pathDepth(File f) {
+                  int d = 0;
+                  File p = f;
+                  while (p != null) {
+                      d++;
+                      p = p.getParentFile();
+                  }
+                  return d;
+              }
+
+              private String analyzeGame(File dir, File exe) {
+                  boolean unity = new File(dir, "UnityPlayer.dll").exists();
+                  boolean il2cpp = new File(dir, "GameAssembly.dll").exists();
+                  boolean bepinex = new File(dir, "BepInEx").isDirectory();
+                  boolean doorstop = new File(dir, "doorstop_config.ini").exists() || new File(dir, "winhttp.dll").exists();
+
                   StringBuilder sb = new StringBuilder();
-                  sb.append(folder.getName()).append("\n");
-                  sb.append(exes.isEmpty() ? "EXE 미감지" : "EXE: " + String.join(", ", exes));
-                  sb.append("\n");
-                  if (unity) sb.append("Unity ");
-                  if (il2cpp) sb.append("• IL2CPP ");
-                  if (bepinex) sb.append("• BepInEx ");
-                  if (doorstop) sb.append("• Doorstop ");
-                  gameInfo.setText(sb.toString().trim());
+                  sb.append(exe.getName()).append("\n");
+                  sb.append("준비 완료");
+                  if (unity) sb.append(" · Unity");
+                  if (il2cpp) sb.append(" · IL2CPP");
+                  if (bepinex) sb.append(" · BepInEx");
+                  if (doorstop) sb.append(" · Doorstop");
+                  return sb.toString();
+              }
+
+              private void startGame() {
+                  if (importedExe == null || !importedExe.isFile()) {
+                      toast("먼저 게임을 추가해 주세요.");
+                      return;
+                  }
+
+                  if (!RootFS.find(this).isValid()) {
+                      toast("실행 엔진이 아직 준비되지 않았습니다.");
+                      return;
+                  }
+
+                  playButton.setEnabled(false);
+                  gameStatus.setText("Windows 실행환경 준비 중…");
+
+                  try {
+                      ContainerManager manager = new ContainerManager(this);
+                      List<Container> containers = manager.getContainers();
+
+                      if (!containers.isEmpty()) {
+                          launchWithContainer(containers.get(0));
+                          return;
+                      }
+
+                      JSONObject data = new JSONObject();
+                      data.put("name", "UniWin Game");
+                      data.put("screenSize", "1280x720");
+
+                      manager.createContainerAsync(data, container -> {
+                          if (container == null) {
+                              gameStatus.setText("Wine 컨테이너 생성에 실패했습니다.");
+                              playButton.setEnabled(true);
+                              return;
+                          }
+                          launchWithContainer(container);
+                      });
+                  }
+                  catch (Exception e) {
+                      gameStatus.setText("실행 준비 실패: " + e.getClass().getSimpleName());
+                      playButton.setEnabled(true);
+                  }
+              }
+
+              private void launchWithContainer(Container container) {
+                  runOnUiThread(() -> {
+                      try {
+                          Intent intent = new Intent(this, XServerDisplayActivity.class);
+                          intent.putExtra("container_id", container.id);
+                          intent.putExtra("exec_path", importedExe.getAbsolutePath());
+                          startActivity(intent);
+                          playButton.setEnabled(true);
+                          gameStatus.setText(importedExe.getName() + "\n실행 요청 완료");
+                      }
+                      catch (Exception e) {
+                          gameStatus.setText("게임 실행 실패: " + e.getClass().getSimpleName());
+                          playButton.setEnabled(true);
+                      }
+                  });
+              }
+
+              private String sanitize(String s) {
+                  return s.replaceAll("[\\\\/:*?\"<>|]", "_");
               }
 
               private LinearLayout card() {
                   LinearLayout x = new LinearLayout(this);
                   x.setOrientation(LinearLayout.VERTICAL);
                   x.setPadding(dp(18), dp(18), dp(18), dp(18));
-                  android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-                  bg.setColor(Color.rgb(22, 27, 36));
+
+                  android.graphics.drawable.GradientDrawable bg =
+                          new android.graphics.drawable.GradientDrawable();
+                  bg.setColor(Color.rgb(20, 25, 34));
                   bg.setCornerRadius(dp(18));
-                  bg.setStroke(dp(1), Color.rgb(48, 55, 68));
+                  bg.setStroke(dp(1), Color.rgb(46, 55, 70));
                   x.setBackground(bg);
                   return x;
-              }
-
-              private TextView sectionTitle(String s) {
-                  TextView t = text(s, 14, true, Color.rgb(196, 203, 214));
-                  t.setPadding(0, 0, 0, dp(10));
-                  return t;
               }
 
               private Button button(String label) {
@@ -281,17 +494,19 @@ jobs:
                   b.setTextSize(15);
                   b.setAllCaps(false);
                   b.setTextColor(Color.WHITE);
-                  android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-                  bg.setColor(Color.rgb(50, 70, 110));
-                  bg.setCornerRadius(dp(12));
+                  b.setMinHeight(dp(50));
+
+                  android.graphics.drawable.GradientDrawable bg =
+                          new android.graphics.drawable.GradientDrawable();
+                  bg.setColor(Color.rgb(58, 84, 150));
+                  bg.setCornerRadius(dp(13));
                   b.setBackground(bg);
-                  b.setMinHeight(dp(48));
                   return b;
               }
 
-              private TextView text(String s, int sp, boolean bold, int color) {
+              private TextView text(String value, int sp, boolean bold, int color) {
                   TextView t = new TextView(this);
-                  t.setText(s);
+                  t.setText(value);
                   t.setTextSize(sp);
                   t.setTextColor(color);
                   if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
@@ -304,15 +519,15 @@ jobs:
                   return v;
               }
 
-              private int dp(int v) {
-                  return (int)(v * getResources().getDisplayMetrics().density + 0.5f);
+              private int dp(int value) {
+                  return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
               }
           }
           EOF
-
-          if ! grep -q 'androidx.documentfile' app/build.gradle; then
-            sed -i "/dependencies {/a\\    implementation 'androidx.documentfile:documentfile:1.0.1'" app/build.gradle
-          fi
 
           grep -RIl '>Winlator<' app/src/main/res/values 2>/dev/null | while read -r f; do
             sed -i 's/>Winlator</>UniWin</g' "$f" || true
@@ -335,13 +550,14 @@ jobs:
           mkdir -p output
           APK="$(find runtime-src/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
           test -n "$APK" || (echo "APK not found" && exit 1)
-          cp "$APK" output/UniWin-0.4.1-Custom-UI.apk
+          cp "$APK" output/UniWin-0.5-One-Tap.apk
           cp runtime-src/UNIWIN_UPSTREAM_LGPL_LICENSE.txt output/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UniWin-0.4.1-custom-ui
+          name: UniWin-0.5-one-tap
           path: output/*
           if-no-files-found: error
           retention-days: 30
+
