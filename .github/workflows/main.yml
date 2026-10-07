@@ -1,4 +1,4 @@
-name: Build UniWin APK
+name: Build UniWin Runtime Preview
 
 on:
   workflow_dispatch:
@@ -6,11 +6,12 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  build-runtime:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: Checkout UniWin repo
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -18,11 +19,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
 
       - name: Find Android SDK manager
         shell: bash
@@ -52,240 +48,69 @@ jobs:
 
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
 
-      - name: Install Android SDK 34
+      - name: Install Android SDK NDK and CMake
         shell: bash
         run: |
           set -e
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;24.0.8215888" \
+            "cmake;3.22.1"
 
-      - name: Create UniWin Android project
+      - name: Clone Winlator runtime source
         shell: bash
         run: |
           set -e
+          git clone --depth 1 https://github.com/brunodev85/winlator-app.git runtime-src
 
-          mkdir -p app/src/main/java/com/uniwin/app
-          mkdir -p app/src/main/res/values
-
-          cat > settings.gradle <<'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-
-          rootProject.name = "UniWin"
-          include(":app")
-          EOF
-
-          cat > build.gradle <<'EOF'
-          plugins {
-              id "com.android.application" version "8.7.3" apply false
-          }
-          EOF
-
-          cat > gradle.properties <<'EOF'
-          android.useAndroidX=true
-          android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-          EOF
-
-          cat > app/build.gradle <<'EOF'
-          plugins {
-              id "com.android.application"
-          }
-
-          android {
-              namespace "com.uniwin.app"
-              compileSdk 34
-
-              defaultConfig {
-                  applicationId "com.uniwin.app"
-                  minSdk 26
-                  targetSdk 34
-                  versionCode 2
-                  versionName "0.2"
-              }
-          }
-
-          dependencies {
-              implementation "androidx.documentfile:documentfile:1.0.1"
-          }
-          EOF
-
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application
-                  android:allowBackup="true"
-                  android:label="UniWin"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
-                  <activity
-                      android:name=".MainActivity"
-                      android:screenOrientation="unspecified"
-                      android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-          cat > app/src/main/java/com/uniwin/app/MainActivity.java <<'EOF'
-          package com.uniwin.app;
-
-          import android.app.Activity;
-          import android.content.Intent;
-          import android.net.Uri;
-          import android.os.Bundle;
-          import android.widget.Button;
-          import android.widget.LinearLayout;
-          import android.widget.ScrollView;
-          import android.widget.TextView;
-
-          import androidx.documentfile.provider.DocumentFile;
-
-          import java.util.ArrayList;
-          import java.util.List;
-          import java.util.Locale;
-
-          public class MainActivity extends Activity {
-              private static final int PICK_FOLDER = 1001;
-              private TextView result;
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-
-                  ScrollView scroll = new ScrollView(this);
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(32, 32, 32, 32);
-
-                  TextView title = new TextView(this);
-                  title.setText("UniWin 0.2");
-                  title.setTextSize(28f);
-
-                  TextView sub = new TextView(this);
-                  sub.setText("Windows 게임 폴더 분석기\n※ 아직 Wine/Box64 실행 엔진은 포함되지 않습니다.");
-                  sub.setTextSize(16f);
-                  sub.setPadding(0, 16, 0, 24);
-
-                  Button pick = new Button(this);
-                  pick.setText("게임 폴더 선택");
-                  pick.setOnClickListener(v -> {
-                      Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-                      intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                              Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
-                              Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
-                              Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-                      startActivityForResult(intent, PICK_FOLDER);
-                  });
-
-                  result = new TextView(this);
-                  result.setText("폴더를 선택하면 EXE/Unity/IL2CPP/BepInEx/Doorstop 여부를 확인합니다.");
-                  result.setTextSize(16f);
-                  result.setPadding(0, 24, 0, 0);
-
-                  root.addView(title);
-                  root.addView(sub);
-                  root.addView(pick);
-                  root.addView(result);
-                  scroll.addView(root);
-                  setContentView(scroll);
-              }
-
-              @Override
-              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-                  super.onActivityResult(requestCode, resultCode, data);
-                  if (requestCode != PICK_FOLDER || resultCode != RESULT_OK || data == null) return;
-
-                  Uri treeUri = data.getData();
-                  if (treeUri == null) return;
-
-                  int flags = data.getFlags() &
-                          (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                  try {
-                      getContentResolver().takePersistableUriPermission(treeUri, flags);
-                  } catch (Exception ignored) {}
-
-                  DocumentFile folder = DocumentFile.fromTreeUri(this, treeUri);
-                  if (folder == null || !folder.isDirectory()) {
-                      result.setText("폴더를 읽지 못했습니다.");
-                      return;
-                  }
-
-                  boolean unityPlayer = false;
-                  boolean gameAssembly = false;
-                  boolean bepinex = false;
-                  boolean doorstop = false;
-                  List<String> exes = new ArrayList<>();
-
-                  for (DocumentFile f : folder.listFiles()) {
-                      String name = f.getName();
-                      if (name == null) continue;
-                      String lower = name.toLowerCase(Locale.ROOT);
-
-                      if (f.isFile() && lower.endsWith(".exe")) exes.add(name);
-                      if (f.isFile() && lower.equals("unityplayer.dll")) unityPlayer = true;
-                      if (f.isFile() && lower.equals("gameassembly.dll")) gameAssembly = true;
-                      if (f.isDirectory() && lower.equals("bepinex")) bepinex = true;
-                      if (f.isFile() && (lower.equals("doorstop_config.ini") || lower.equals("winhttp.dll"))) {
-                          doorstop = true;
-                      }
-                  }
-
-                  StringBuilder out = new StringBuilder();
-                  out.append("선택한 폴더: ").append(folder.getName()).append("\n\n");
-                  out.append("EXE 파일:");
-                  if (exes.isEmpty()) {
-                      out.append(" 없음");
-                  } else {
-                      for (String exe : exes) out.append("\n • ").append(exe);
-                  }
-
-                  out.append("\n\n엔진 분석");
-                  out.append("\n • Unity: ").append(unityPlayer ? "감지됨" : "미감지");
-                  out.append("\n • IL2CPP: ").append(gameAssembly ? "감지됨" : "미감지");
-                  out.append("\n • BepInEx: ").append(bepinex ? "감지됨" : "미감지");
-                  out.append("\n • Doorstop: ").append(doorstop ? "감지됨" : "미감지");
-
-                  if (unityPlayer && gameAssembly) {
-                      out.append("\n\n추천 프로필: Unity IL2CPP");
-                  }
-
-                  out.append("\n\n다음 단계: Wine + Box64 + DXVK 실행 엔진 통합");
-                  result.setText(out.toString());
-              }
-          }
-          EOF
-
-          cat > app/src/main/res/values/strings.xml <<'EOF'
-          <resources>
-              <string name="app_name">UniWin</string>
-          </resources>
-          EOF
-
-      - name: Build debug APK
+      - name: Apply UniWin preview branding
         shell: bash
         run: |
           set -e
-          gradle --no-daemon :app:assembleDebug
+          cd runtime-src
 
-      - name: Upload APK artifact
+          # Keep the original Java namespace for compatibility, but install as a separate Android app.
+          sed -i "s/applicationId 'com.winlator'/applicationId 'com.uniwin.runtime'/" app/build.gradle
+          sed -i 's/versionName "11.2"/versionName "0.3-runtime-preview"/' app/build.gradle
+
+          # Change visible app label where the source defines it.
+          if grep -RIl 'Winlator' app/src/main/res/values >/tmp/uniwin_string_files 2>/dev/null; then
+            while IFS= read -r f; do
+              sed -i 's/>Winlator</>UniWin Runtime</g' "$f" || true
+            done </tmp/uniwin_string_files
+          fi
+
+          # Preserve upstream license in the produced source tree.
+          cp LICENSE UNIWIN_UPSTREAM_LGPL_LICENSE.txt
+
+      - name: Build runtime APK
+        shell: bash
+        run: |
+          set -e
+          cd runtime-src
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Prepare APK
+        shell: bash
+        run: |
+          set -e
+          mkdir -p output
+          APK="$(find runtime-src/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "APK not found"
+            exit 1
+          fi
+          cp "$APK" output/UniWin-0.3-Runtime-Preview.apk
+          cp runtime-src/UNIWIN_UPSTREAM_LGPL_LICENSE.txt output/
+
+      - name: Upload UniWin runtime APK
         uses: actions/upload-artifact@v4
         with:
-          name: UniWin-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: UniWin-0.3-runtime-preview
+          path: output/*
           if-no-files-found: error
+          retention-days: 30
