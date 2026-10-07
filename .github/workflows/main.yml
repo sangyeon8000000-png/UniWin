@@ -13,29 +13,62 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          java-version: "17"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: "8.9"
 
-      - name: Generate UniWin Android project
+      - name: Find Android SDK manager
         shell: bash
         run: |
-          mkdir -p app/src/main/java/com/uniwin/launcher
+          set -e
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          SDKMANAGER=""
+          for p in \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "$ANDROID_HOME/cmdline-tools/bin/sdkmanager" \
+            "$ANDROID_SDK_ROOT/cmdline-tools/bin/sdkmanager"
+          do
+            if [ -x "$p" ]; then
+              SDKMANAGER="$p"
+              break
+            fi
+          done
+
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
+            exit 1
+          fi
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+      - name: Install Android SDK 34
+        shell: bash
+        run: |
+          set -e
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Create UniWin Android project
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p app/src/main/java/com/uniwin/app
+          mkdir -p app/src/main/res/values
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -45,6 +78,7 @@ jobs:
                   gradlePluginPortal()
               }
           }
+
           dependencyResolutionManagement {
               repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories {
@@ -52,42 +86,46 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = 'UniWin'
-          include ':app'
+
+          rootProject.name = "UniWin"
+          include(":app")
           EOF
 
           cat > build.gradle <<'EOF'
           plugins {
-              id 'com.android.application' version '8.5.2' apply false
+              id "com.android.application" version "8.7.3" apply false
           }
           EOF
 
           cat > app/build.gradle <<'EOF'
           plugins {
-              id 'com.android.application'
+              id "com.android.application"
           }
 
           android {
-              namespace 'com.uniwin.launcher'
-              compileSdk 35
+              namespace "com.uniwin.app"
+              compileSdk 34
 
               defaultConfig {
-                  applicationId 'com.uniwin.launcher'
+                  applicationId "com.uniwin.app"
                   minSdk 26
-                  targetSdk 35
+                  targetSdk 34
                   versionCode 1
-                  versionName '0.1-mobile'
+                  versionName "0.1"
               }
+          }
+
+          dependencies {
+              implementation "androidx.documentfile:documentfile:1.0.1"
           }
           EOF
 
           cat > app/src/main/AndroidManifest.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <application
                   android:allowBackup="true"
                   android:label="UniWin"
-                  android:theme="@style/AppTheme">
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
                   <activity
                       android:name=".MainActivity"
                       android:screenOrientation="unspecified"
@@ -101,221 +139,150 @@ jobs:
           </manifest>
           EOF
 
-          mkdir -p app/src/main/res/values
-          cat > app/src/main/res/values/styles.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
-                  <item name="android:fontFamily">sans</item>
-                  <item name="android:windowLightStatusBar">true</item>
-                  <item name="android:navigationBarColor">#111318</item>
-                  <item name="android:statusBarColor">#111318</item>
-              </style>
-          </resources>
-          EOF
-
-          cat > app/src/main/java/com/uniwin/launcher/MainActivity.java <<'EOF'
-          package com.uniwin.launcher;
+          cat > app/src/main/java/com/uniwin/app/MainActivity.java <<'EOF'
+          package com.uniwin.app;
 
           import android.app.Activity;
           import android.content.Intent;
-          import android.database.Cursor;
-          import android.graphics.Color;
           import android.net.Uri;
           import android.os.Bundle;
-          import android.provider.DocumentsContract;
           import android.view.View;
           import android.widget.Button;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.TextView;
 
-          import java.io.InputStream;
+          import androidx.documentfile.provider.DocumentFile;
+
           import java.util.ArrayList;
           import java.util.List;
           import java.util.Locale;
 
           public class MainActivity extends Activity {
-              private static final int PICK_GAME_FOLDER = 1001;
-              private TextView status;
+              private static final int PICK_FOLDER = 1001;
+              private TextView result;
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
+                  ScrollView scroll = new ScrollView(this);
                   LinearLayout root = new LinearLayout(this);
                   root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(dp(18), dp(22), dp(18), dp(22));
-                  root.setBackgroundColor(Color.rgb(17, 19, 24));
+                  root.setPadding(32, 32, 32, 32);
 
                   TextView title = new TextView(this);
-                  title.setText("UniWin");
-                  title.setTextSize(30);
-                  title.setTextColor(Color.WHITE);
-                  title.setTypeface(null, 1);
-                  root.addView(title);
+                  title.setText("UniWin 0.1");
+                  title.setTextSize(28f);
 
-                  TextView subtitle = new TextView(this);
-                  subtitle.setText("Windows 게임 폴더 자동 분석기 · 0.1 Mobile");
-                  subtitle.setTextSize(15);
-                  subtitle.setTextColor(Color.rgb(180, 185, 195));
-                  subtitle.setPadding(0, dp(6), 0, dp(20));
-                  root.addView(subtitle);
+                  TextView sub = new TextView(this);
+                  sub.setText("Windows 게임 폴더 분석기\n※ 이 버전은 아직 Wine/Box64 실행 엔진을 포함하지 않습니다.");
+                  sub.setTextSize(16f);
+                  sub.setPadding(0, 16, 0, 24);
 
                   Button pick = new Button(this);
                   pick.setText("게임 폴더 선택");
-                  pick.setAllCaps(false);
-                  pick.setTextSize(17);
-                  pick.setOnClickListener(v -> chooseFolder());
-                  root.addView(pick, new LinearLayout.LayoutParams(-1, dp(56)));
+                  pick.setOnClickListener(v -> {
+                      Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                      intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                              Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                              Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
+                              Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                      startActivityForResult(intent, PICK_FOLDER);
+                  });
 
-                  status = new TextView(this);
-                  status.setText("게임 폴더를 선택하면 EXE와 Unity / IL2CPP / BepInEx / Doorstop 구성을 검사합니다.\n\n※ 이 0.1 빌드는 분석기이며 Wine/Box64 실행 엔진은 아직 포함하지 않습니다.");
-                  status.setTextSize(16);
-                  status.setTextColor(Color.WHITE);
-                  status.setLineSpacing(0, 1.25f);
-                  status.setPadding(0, dp(22), 0, dp(22));
+                  result = new TextView(this);
+                  result.setText("폴더를 선택하면 EXE/Unity/IL2CPP/BepInEx 여부를 확인합니다.");
+                  result.setTextSize(16f);
+                  result.setPadding(0, 24, 0, 0);
 
-                  ScrollView scroll = new ScrollView(this);
-                  scroll.addView(status);
-                  root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
-
-                  setContentView(root);
-              }
-
-              private int dp(int v) {
-                  return Math.round(v * getResources().getDisplayMetrics().density);
-              }
-
-              private void chooseFolder() {
-                  Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-                  intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                          Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
-                          Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-                  startActivityForResult(intent, PICK_GAME_FOLDER);
+                  root.addView(title);
+                  root.addView(sub);
+                  root.addView(pick);
+                  root.addView(result);
+                  scroll.addView(root);
+                  setContentView(scroll);
               }
 
               @Override
               protected void onActivityResult(int requestCode, int resultCode, Intent data) {
                   super.onActivityResult(requestCode, resultCode, data);
-                  if (requestCode == PICK_GAME_FOLDER && resultCode == RESULT_OK && data != null && data.getData() != null) {
-                      Uri treeUri = data.getData();
-                      try {
-                          getContentResolver().takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                      } catch (Exception ignored) {}
-                      analyzeFolder(treeUri);
+
+                  if (requestCode != PICK_FOLDER || resultCode != RESULT_OK || data == null) return;
+
+                  Uri treeUri = data.getData();
+                  if (treeUri == null) return;
+
+                  int flags = data.getFlags() &
+                          (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                  try {
+                      getContentResolver().takePersistableUriPermission(treeUri, flags);
+                  } catch (Exception ignored) {}
+
+                  DocumentFile folder = DocumentFile.fromTreeUri(this, treeUri);
+                  if (folder == null || !folder.isDirectory()) {
+                      result.setText("폴더를 읽지 못했습니다.");
+                      return;
                   }
-              }
 
-              private void analyzeFolder(Uri treeUri) {
-                  status.setText("분석 중...");
-                  new Thread(() -> {
-                      try {
-                          String rootDocId = DocumentsContract.getTreeDocumentId(treeUri);
-                          Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, rootDocId);
+                  boolean unityPlayer = false;
+                  boolean gameAssembly = false;
+                  boolean bepinex = false;
+                  boolean doorstop = false;
+                  List<String> exes = new ArrayList<>();
 
-                          boolean unity = false;
-                          boolean il2cpp = false;
-                          boolean bepinex = false;
-                          boolean doorstop = false;
-                          List<String> exes = new ArrayList<>();
-                          List<String> archs = new ArrayList<>();
+                  for (DocumentFile f : folder.listFiles()) {
+                      String name = f.getName();
+                      if (name == null) continue;
+                      String lower = name.toLowerCase(Locale.ROOT);
 
-                          String[] projection = {
-                                  DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                                  DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                                  DocumentsContract.Document.COLUMN_MIME_TYPE
-                          };
-
-                          try (Cursor c = getContentResolver().query(children, projection, null, null, null)) {
-                              if (c != null) {
-                                  int idCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID);
-                                  int nameCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME);
-                                  int mimeCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE);
-
-                                  while (c.moveToNext()) {
-                                      String docId = c.getString(idCol);
-                                      String name = c.getString(nameCol);
-                                      String mime = c.getString(mimeCol);
-                                      if (name == null) continue;
-                                      String lower = name.toLowerCase(Locale.ROOT);
-                                      boolean isDir = DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
-
-                                      if (lower.equals("unityplayer.dll") || (isDir && lower.endsWith("_data"))) unity = true;
-                                      if (lower.equals("gameassembly.dll")) il2cpp = true;
-                                      if (isDir && lower.equals("bepinex")) bepinex = true;
-                                      if (lower.equals("doorstop_config.ini") || lower.equals("winhttp.dll")) doorstop = true;
-
-                                      if (!isDir && lower.endsWith(".exe")) {
-                                          Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId);
-                                          exes.add(name);
-                                          archs.add(readPeArchitecture(fileUri));
-                                      }
-                                  }
-                              }
-                          }
-
-                          StringBuilder out = new StringBuilder();
-                          out.append("분석 완료\n\n");
-                          if (exes.isEmpty()) {
-                              out.append("EXE: 발견되지 않음\n");
-                          } else {
-                              out.append("EXE 발견: ").append(exes.size()).append("개\n");
-                              for (int i = 0; i < exes.size(); i++) {
-                                  out.append(" • ").append(exes.get(i)).append("  [").append(archs.get(i)).append("]\n");
-                              }
-                          }
-                          out.append("\nEngine: ").append(unity ? "Unity 감지" : "Unity 표시 없음").append("\n");
-                          out.append("IL2CPP: ").append(il2cpp ? "감지됨" : "감지 안 됨").append("\n");
-                          out.append("BepInEx: ").append(bepinex ? "감지됨" : "감지 안 됨").append("\n");
-                          out.append("Doorstop: ").append(doorstop ? "감지됨" : "감지 안 됨").append("\n\n");
-
-                          if (unity && il2cpp) out.append("추천 프로필: Unity IL2CPP\n");
-                          else if (unity) out.append("추천 프로필: Unity 일반\n");
-                          else out.append("추천 프로필: Windows 일반\n");
-
-                          out.append("\n현재 단계: 게임 분석기\n다음 단계: Wine + Box64 + DXVK 실행 엔진 통합");
-                          String result = out.toString();
-                          runOnUiThread(() -> status.setText(result));
-                      } catch (Exception e) {
-                          runOnUiThread(() -> status.setText("분석 실패\n\n" + e.getClass().getSimpleName() + ": " + e.getMessage()));
+                      if (f.isFile() && lower.endsWith(".exe")) exes.add(name);
+                      if (f.isFile() && lower.equals("unityplayer.dll")) unityPlayer = true;
+                      if (f.isFile() && lower.equals("gameassembly.dll")) gameAssembly = true;
+                      if (f.isDirectory() && lower.equals("bepinex")) bepinex = true;
+                      if (f.isFile() && (lower.equals("doorstop_config.ini") || lower.equals("winhttp.dll"))) {
+                          doorstop = true;
                       }
-                  }).start();
-              }
-
-              private String readPeArchitecture(Uri uri) {
-                  try (InputStream in = getContentResolver().openInputStream(uri)) {
-                      if (in == null) return "unknown";
-                      byte[] header = new byte[4096];
-                      int total = 0;
-                      while (total < header.length) {
-                          int n = in.read(header, total, header.length - total);
-                          if (n <= 0) break;
-                          total += n;
-                      }
-                      if (total < 64 || header[0] != 'M' || header[1] != 'Z') return "unknown";
-                      int pe = (header[0x3c] & 0xff) |
-                              ((header[0x3d] & 0xff) << 8) |
-                              ((header[0x3e] & 0xff) << 16) |
-                              ((header[0x3f] & 0xff) << 24);
-                      if (pe < 0 || pe + 6 >= total) return "unknown";
-                      if (header[pe] != 'P' || header[pe + 1] != 'E') return "unknown";
-                      int machine = (header[pe + 4] & 0xff) | ((header[pe + 5] & 0xff) << 8);
-                      if (machine == 0x8664) return "x64";
-                      if (machine == 0x014c) return "x86";
-                      if (machine == 0xAA64) return "ARM64";
-                      return String.format(Locale.ROOT, "0x%04X", machine);
-                  } catch (Exception e) {
-                      return "unknown";
                   }
+
+                  StringBuilder out = new StringBuilder();
+                  out.append("선택한 폴더: ").append(folder.getName()).append("\n\n");
+                  out.append("EXE 파일: ");
+                  if (exes.isEmpty()) {
+                      out.append("없음");
+                  } else {
+                      for (String exe : exes) out.append("\n • ").append(exe);
+                  }
+
+                  out.append("\n\n엔진 분석");
+                  out.append("\n • Unity: ").append(unityPlayer ? "감지됨" : "미감지");
+                  out.append("\n • IL2CPP: ").append(gameAssembly ? "감지됨" : "미감지");
+                  out.append("\n • BepInEx: ").append(bepinex ? "감지됨" : "미감지");
+                  out.append("\n • Doorstop: ").append(doorstop ? "감지됨" : "미감지");
+
+                  if (unityPlayer && gameAssembly) {
+                      out.append("\n\n추천 프로필: Unity IL2CPP");
+                  }
+
+                  out.append("\n\n실제 EXE 실행 기능은 다음 단계에서 Wine + Box64 + DXVK를 통합해야 합니다.");
+                  result.setText(out.toString());
               }
           }
           EOF
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">UniWin</string>
+          </resources>
+          EOF
 
-      - name: Upload APK
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -e
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: UniWin-debug-apk
